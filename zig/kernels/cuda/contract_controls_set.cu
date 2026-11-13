@@ -5,3 +5,4 @@
 #include "contract_dense_controls.cuh"
 #include "contract_experts_bf16_controls.cuh"
 #include "contract_nemo_audio_controls.cuh"
+#include "contract_wrows_controls.cuh"
