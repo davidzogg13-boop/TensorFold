@@ -76,6 +76,7 @@ pub const Config = struct {
     seed_salt: i64 = 0,
     silence_mid: bool = false,
     silence_guard: bool = false,
+    speech: @import("speech_cli.zig").Flags = .{},
     cfg: ?@import("drama_cfg.zig").Options = null,
     prompt_seed: bool = false, // --prompt-seed: historical prompt-keyed sampling when a request omits its seed
     /// TENSORFOLD_REQUEST_LOG: where chat and completion bodies are appended; null: nowhere.
@@ -212,10 +213,7 @@ pub const Server = struct {
             srv.voices = try @import("drama_voice.zig").load(srv.arena.allocator(), io, dir);
         }
         _ = try @import("drama_voice.zig").select(srv.voices, config.default_voice, "default");
-        if (!srv.info.capability(.text_generation)) {
-            if (config.cortheon) return error.CortheonRequiresTextGeneration;
-            return srv;
-        }
+        if (!srv.info.capability(.text_generation)) return if (config.cortheon) error.CortheonRequiresTextGeneration else srv;
         if (config.cortheon) srv.cortheon = try cortheon.State.init(gpa, io, "TensorFold-Cortheon (+https://github.com/ashhart/TensorFold)", config.cortheon_search_key);
         if (config.keep_warm_s > 0) if (engine.keepaliveTarget()) |target| {
             srv.keepalive = api.keepalive.Keepalive.start(gpa, io, target, @as(i64, config.keep_warm_s) * std.time.ns_per_s) catch |e| blk: {
