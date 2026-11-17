@@ -106,7 +106,7 @@ test "CUDA warm rules: a warm end stays usable only where a family declares it, 
     try std.testing.expect(!cacheRules(Ends).warm_usable);
 }
 
-test "snap_cut_invariant: message starts are on by default for invariant families, opt-in for the rest" {
+test "request starts: snap_cut_invariant: message starts are on by default for invariant families, opt-in for the rest" {
     const snaps = @import("cuda_snaps.zig");
     // Nemotron/LFM-style: chunk-invariant, no switch; the step is prompt_rows or a declared snap_grid.
     const Nemotron = struct {
