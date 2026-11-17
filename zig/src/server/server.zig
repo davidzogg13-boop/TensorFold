@@ -80,8 +80,8 @@ pub const Config = struct {
     prompt_seed: bool = false, // --prompt-seed: historical prompt-keyed sampling when a request omits its seed
     /// TENSORFOLD_REQUEST_LOG: where chat and completion bodies are appended; null: nowhere.
     request_log: ?[]const u8 = null,
-    /// TENSORFOLD_PHASE_METRICS=1: /metrics adds the queue phase's histogram; unset, its families are as before.
-    phase_metrics: bool = false,
+    phase_metrics: bool = false, // TENSORFOLD_PHASE_METRICS=1: /metrics adds the queue phase's histogram
+    cache_why: bool = false, // TF_CACHE_WHY=1: each reply's tensorfold block says why its prompt resumed no further
     /// The Spark server's keys in each reply's ``tensorfold`` block (spark_wire.zig): DeepSeek-V4, or TENSORFOLD_WIRE.
     spark_stats: bool = false,
     /// Null keeps every reply identical to a server that has no compaction.

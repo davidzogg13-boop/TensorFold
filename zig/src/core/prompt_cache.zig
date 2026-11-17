@@ -12,6 +12,7 @@ const interior = @import("prompt_interior.zig");
 const intermediate = @import("prompt_intermediate.zig");
 const index = @import("prompt_cache_index.zig");
 const forks = @import("prompt_cache_fork.zig");
+pub const why = @import("prompt_cache_why.zig"); // why a request resumed no further (#3686)
 pub const others = @import("prompt_cache_others.zig");
 pub const rows = @import("rows_store.zig");
 /// A family's copy of one state.
@@ -99,6 +100,7 @@ pub const Entry = struct {
     branched: bool = false, // resumed again after a later prompt kept a longer state extending it: never superseded
     intermediate: bool = false, // any kept state at a ladder position: once superseded, goes after other copies but before any newest state
     expired: bool = false, // hidden from lookups immediately, reclaimed only at safe host boundaries
+    gone: why.Reason = .evicted, // what its removal tells a later miss: set where `expired` is
     borrowers: u32 = 0, // outstanding lookups: released by resumed or release, never evicted while borrowed
     ext: std.ArrayList(*Entry) = .empty, // live extensions born no earlier
     own: []u32 = &.{}, // the kept prompt's one copy, which `tokens` and at first `last` slice (empty: they own theirs)
@@ -107,9 +109,9 @@ pub const Counts = struct { hits: u64 = 0, misses: u64 = 0, kept: u64 = 0, evict
 pub const RestoreDetails = @import("prompt_cache_restore.zig").Details;
 pub const RestoreLog = @import("prompt_cache_restore.zig").Log;
 /// Where a prompt pass starts and where it stops to keep its state (marks sorted, in `a`).
-pub const Plan = struct { from: u32 = 0, marks: []const u32 = &.{} };
+pub const Plan = struct { from: u32 = 0, marks: []const u32 = &.{}, why: why.Why = .{} };
 /// The borrowed entry a backend restores; the caller must report resumed or release it, even on cancellation.
-pub const Lookup = struct { entry: ?*Entry = null, marks: []const u32 = &.{} };
+pub const Lookup = struct { entry: ?*Entry = null, marks: []const u32 = &.{}, why: why.Why = .{} };
 pub const Store = struct {
     image_frame: u32 = 0,
     image_query: ?[]const @import("lanes").stream.Image = null, // scoped to one serial lookup or keep
@@ -137,6 +139,7 @@ pub const Store = struct {
     eviction: Eviction = .main,
     resume_carry: @import("prompt_cache_decay.zig").Credit = .{},
     repeat_log: @import("prompt_cache_repeat.zig").Log = .{},
+    gone: why.Gone = .{}, // states removed or refused lately, read only to name a later miss's reason
     const SHARED_KEYS = 64;
     pub const lookupUserImages = images.lookupUser;
     pub const keepBornImages = images.keepBorn;
@@ -175,6 +178,7 @@ pub const Store = struct {
         policy.unlink(s, e);
         s.held -= e.bytes;
         if (s.disk) |r| if (!e.expired) rows.write.evicted(r, e); // --spill-gib: stage an owned copy before the entry goes
+        s.gone.note(e.tokens, e.at, why.entryKey(e), e.gone);
         s.free(e);
     }
 
@@ -276,7 +280,7 @@ pub const Store = struct {
                 if (fresh_marks) |m| if (m.ptr != l.marks.ptr) a.free(m);
                 // Restored: this state may go too; a peer restores before it drops.
                 s.reserve(prompt, @intCast(prompt.len), null, l.marks, spans, @import("prompt_cache_reserve.zig").endpointFor(s, prompt, at, history_len, starts, spans));
-                return .{ .from = at, .marks = l.marks };
+                return .{ .from = at, .marks = l.marks, .why = l.why };
             } else |err| {
                 // a refused state is dropped, then the next shorter RAM state is tried before the pass from the start
                 if (fresh_marks == null) fresh_marks = l.marks else a.free(l.marks);
@@ -287,7 +291,7 @@ pub const Store = struct {
         const marks_ = fresh_marks orelse l.marks;
         if (fresh_marks != null and l.marks.ptr != marks_.ptr) a.free(l.marks);
         s.reserve(prompt, @intCast(prompt.len), null, marks_, spans, @import("prompt_cache_reserve.zig").endpointFor(s, prompt, 0, history_len, starts, spans));
-        return .{ .marks = marks_ };
+        return .{ .marks = marks_, .why = l.why };
     }
 
     /// Look up canonical-span state and marks without restoring; the caller later reports resumed.
@@ -329,6 +333,7 @@ pub const Store = struct {
         else
             s.find(prompt, starts, spans);
         @import("prompt_cache_divergence.zig").report(s, prompt, spans, e);
+        const reason = why.diagnose(s, prompt, starts, spans, e); // before marks or reserve change the store
         if (e == null) s.counts.misses += 1;
         const from = if (e) |x| x.at else 0;
         const ordinary = if (s.active_rewind_at == 0)
@@ -355,7 +360,7 @@ pub const Store = struct {
         s.reserve(prompt, born, e, marked, spans, primary);
         const fitted = try @import("prompt_cache_reserve.zig").fitting(s, a, prompt, marked, spans, e, born, primary);
         if (e) |entry| entry.borrowers += 1;
-        return .{ .entry = e, .marks = fitted };
+        return .{ .entry = e, .marks = fitted, .why = reason };
     }
 
     const reserve = @import("prompt_cache_reserve.zig").reserve;
@@ -363,7 +368,10 @@ pub const Store = struct {
     /// Every kept state goes after a weight change, and learned states on disk stop being read: old arithmetic.
     pub fn clear(s: *Store) void {
         if (s.disk) |r| rows.write.stop(r, rows.write.nowNs());
-        for (s.entries.items) |e| e.expired = true;
+        for (s.entries.items) |e| {
+            e.expired = true;
+            e.gone = .cleared;
+        }
         s.collectExpired();
         s.shared_keys.clearRetainingCapacity();
         s.imprint = null;
@@ -377,6 +385,7 @@ pub const Store = struct {
         for (s.entries.items) |e| if (!e.expired and e.at == at and e.tokens.len <= prompt.len and std.mem.eql(u32, e.tokens, prompt[0..e.tokens.len]) and modes.equal(e.decode_spans, spans, at) and images.matches(s, e)) {
             s.counts.failed += 1;
             e.expired = true;
+            e.gone = .expired;
             return s.collectExpired();
         };
     }
@@ -539,4 +548,5 @@ test {
     _ = @import("prompt_cache_repeat_test.zig");
     _ = @import("prompt_cache_tail_test.zig");
     _ = @import("prompt_cache_others_test.zig");
+    _ = @import("prompt_cache_why_test.zig");
 }
