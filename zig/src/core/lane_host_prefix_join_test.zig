@@ -100,10 +100,10 @@ fn promptOf(buf: *[prompt_len]u32) []const u32 {
 }
 
 /// Every identical request queued before the host starts, so they arrive together; `budget` 0 is a fully cold cache.
-fn fanout(wait_ms: ?u32, slow_ms: i64, budget: u64, out: *Run) !void {
+fn fanout(wait_ms: ?u32, slow_ms: i64, budget: u64, fail_pieces: usize, out: *Run) !void {
     var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
     defer cfg.deinit(gpa);
-    var target: lanes.fake.Fake = .{ .gpa = gpa, .prefill_chunks = 13 };
+    var target: lanes.fake.Fake = .{ .gpa = gpa, .prefill_chunks = 13, .fail_pieces = fail_pieces };
     defer target.deinit();
     var clock: lanes.fake.FixedClock = .{};
     var core = lanes.Engine.init(gpa, &cfg, target.stepped(), clock.clock());
@@ -154,10 +154,10 @@ fn fanout(wait_ms: ?u32, slow_ms: i64, budget: u64, out: *Run) !void {
 test "single-flight: identical prompts join the filling leader, whose whole fill runs alone" {
     var on: Run = .{};
     defer on.deinit();
-    try fanout(null, 1, 1 << 24, &on);
+    try fanout(null, 1, 1 << 24, 0, &on);
     var off: Run = .{};
     defer off.deinit();
-    try fanout(0, 1, 1 << 24, &off);
+    try fanout(0, 1, 1 << 24, 0, &off);
     for (0..requests) |i| {
         try std.testing.expectEqual(Reason.length, on.reasons[i]);
         try std.testing.expectEqual(Reason.length, off.reasons[i]);
@@ -182,10 +182,10 @@ test "single-flight: identical prompts join the filling leader, whose whole fill
 test "single-flight: cold cache — identical prompts join a leader with no marks and nothing kept" {
     var on: Run = .{};
     defer on.deinit();
-    try fanout(null, 1, 0, &on);
+    try fanout(null, 1, 0, 0, &on);
     var off: Run = .{};
     defer off.deinit();
-    try fanout(0, 1, 0, &off);
+    try fanout(0, 1, 0, 0, &off);
     for (0..requests) |i| {
         try std.testing.expectEqual(Reason.length, on.reasons[i]);
         try std.testing.expectEqual(Reason.length, off.reasons[i]);
@@ -205,4 +205,35 @@ test "single-flight: cold cache — identical prompts join a leader with no mark
     try std.testing.expectEqual(@as(u64, requests), off.misses);
     try std.testing.expectEqual(@as(u64, 0), off.waits);
     try std.testing.expect(off.leader_open_most > 1); // the side-by-side prefill this joins
+}
+
+test "single-flight: the leader's failure releases the joiners, who prefill on their own" {
+    var on: Run = .{};
+    defer on.deinit();
+    try fanout(null, 1, 1 << 24, 1, &on); // the next piece call, the leader's first, fails
+    var off: Run = .{};
+    defer off.deinit();
+    try fanout(0, 1, 1 << 24, 0, &off);
+    // the leader failed; each waiter went on and prefilled its own prompt, so its reply equals a solo run's
+    try std.testing.expectEqual(Reason.failed, on.reasons[0]);
+    for (1..requests) |i| {
+        try std.testing.expectEqual(Reason.length, on.reasons[i]);
+        try std.testing.expectEqualSlices(u32, off.boxes[i].tokens.items, on.boxes[i].tokens.items);
+    }
+}
+
+test "single-flight: the bound passes and the joiners prefill on their own" {
+    var on: Run = .{};
+    defer on.deinit();
+    try fanout(1, 30, 1 << 24, 0, &on); // a 1 ms bound against a leader whose chunks take 30 ms
+    var off: Run = .{};
+    defer off.deinit();
+    try fanout(0, 30, 1 << 24, 0, &off);
+    for (0..requests) |i| {
+        try std.testing.expectEqual(Reason.length, on.reasons[i]);
+        try std.testing.expectEqualSlices(u32, off.boxes[i].tokens.items, on.boxes[i].tokens.items); // joined == solo
+    }
+    // every waiter was released at the bound with the leader still filling, and prefilled beside it
+    try std.testing.expectEqual(@as(u64, requests - 1), on.timeouts);
+    try std.testing.expect(on.leader_open_most > 1);
 }

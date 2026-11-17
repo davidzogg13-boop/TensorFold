@@ -39,6 +39,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Qwen3.8-27B on Metal: when a reply ends, the optional pin that keeps its history for a same-prompt regeneration counts everything the prompt cache already holds and every promised slot first, so it can no longer evict another conversation's newest state in a tight cache (#3556).
 
+- Lane host: concurrent identical prompts join a filling leader's whole fill — a queued request whose prompt is the leader's own, by identity alone (cache key, raw tokens and spans), waits for the whole fill on a cold or warm cache and resumes the kept cut, so one identical prompt computes at a time; the leader's finish, cancel, failure or the wait bound releases every waiter to prefill on its own, the waiters held to the admission cap, and every joined reply is token for token a solo run's (#3397, #3487).
+
+
 - Server: a grammar over 512 KiB is refused with HTTP 400 before it is compiled, so one oversized schema can no longer hold the grammar compiler for a minute (#3038).
 
 - Qwen3.8-27B on XPU: the target's and the DFlash2 drafter's RoPE tables come from core's exact helper, so they hold the reference's fp32 words; 15 of 32 and 18 of 64 values move by 1 ulp (#2000, part of #1852).
