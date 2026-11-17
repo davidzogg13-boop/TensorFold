@@ -7,7 +7,7 @@ const queue = @import("lane_cache_queue.zig");
 const Fake = @import("prompt_cache_fake.zig").Fake;
 const a = std.testing.allocator;
 
-const Mode = enum { reduce, last, prefilled, protect, fallback, fallback_room, fallback_spare, oom };
+const Mode = enum { reduce, last, prefilled, protect, fallback, fallback_room, fallback_spare, cancelled, cancelled_protect, cancelled_no_fit, oom };
 
 fn event(_: *anyopaque, _: api.Id, _: *const api.Event) void {}
 
@@ -26,14 +26,21 @@ fn exercise(mode: Mode) !void {
         fn held(_: *anyopaque) u64 {
             return 200;
         }
+        fn reuses(_: *anyopaque, _: u32) bool {
+            return false;
+        }
     };
     if (mode == .fallback_spare) {
         vtable.spare = Spare.held;
         snapshots.vtable = &vtable;
     }
+    if (mode == .cancelled_no_fit) {
+        vtable.reuses = Spare.reuses;
+        snapshots.vtable = &vtable;
+    }
     var store = pc.Store.init(a, snapshots, .{ .min_prompt = 0, .min_gap = 0 }, switch (mode) {
-        .protect => 220,
-        .fallback, .fallback_spare => 320,
+        .protect, .cancelled_protect, .cancelled_no_fit => 220,
+        .fallback, .fallback_spare, .cancelled => 320,
         .prefilled => 300,
         else => 600,
     });
@@ -52,7 +59,7 @@ fn exercise(mode: Mode) !void {
     job.stream = try lanes.Stream.init(a, .{ .id = "promise", .prompt = &words, .max_new = 1 });
     defer job.stream.deinit(a);
     try host.admitted.append(a, &job);
-    if (mode == .protect or mode == .oom or mode == .fallback or mode == .fallback_spare) {
+    if (mode == .protect or mode == .oom or mode == .fallback or mode == .fallback_spare or mode == .cancelled or mode == .cancelled_protect or mode == .cancelled_no_fit) {
         _ = family.pass(&store, other[0..8], .{});
         try std.testing.expect(store.keepBorn(&other, 8, 8, null, &.{}, &.{}));
     }
@@ -107,6 +114,33 @@ fn exercise(mode: Mode) !void {
             try std.testing.expectEqual(@as(u64, 0), store.counts.evicted);
             try std.testing.expectEqual(held + @as(u64, if (mode == .fallback_room) 106 else 0), store.held);
         },
+        .cancelled_no_fit => {
+            _ = family.pass(&store, idle[0..8], .{});
+            try std.testing.expect(store.keepBorn(&idle, 8, 8, null, &.{}, &.{}));
+            try host.queued.append(a, &later);
+            _ = family.pass(&store, words[0..16], .{});
+            queue.interrupted(&host, &job, &job.stream, 16);
+            try std.testing.expect(store.find(&other, &.{}, &.{}) != null);
+            try std.testing.expect(store.find(&idle, &.{}, &.{}) != null);
+            try std.testing.expect(store.find(&words, &.{}, &.{}) == null);
+            try std.testing.expectEqual(@as(u64, 0), store.counts.evicted);
+        },
+        .cancelled, .cancelled_protect => {
+            job.marks = &.{12};
+            job.cache_promise = .{ .bytes = 112, .slots = 1 };
+            later.cache_promise = .{ .bytes = if (mode == .cancelled) 100 else 112, .slots = 1 };
+            try host.admitted.append(a, &later);
+            _ = family.pass(&store, words[0..6], .{});
+            queue.interrupted(&host, &job, &job.stream, 6);
+            try std.testing.expectEqual(@as(u64, 0), job.cache_promise.bytes);
+            try std.testing.expectEqual(@as(usize, 0), job.cache_promise.slots);
+            try std.testing.expectEqual(@as(u64, if (mode == .cancelled) 100 else 112), later.cache_promise.bytes);
+            try std.testing.expectEqual(@as(usize, 1), later.cache_promise.slots);
+            try std.testing.expect(store.find(&other, &.{}, &.{}) != null);
+            try std.testing.expectEqual(mode == .cancelled, store.find(&words, &.{}, &.{}) != null);
+            try std.testing.expect(store.held + later.cache_promise.bytes <= store.budget);
+            try std.testing.expectEqual(@as(u64, 0), store.counts.evicted);
+        },
         .oom => {
             try host.queued.append(a, &later);
             var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
@@ -144,4 +178,10 @@ test "queued cache: fallback checkpoints neither evict nor spend either job's pr
 
 test "queued cache: failed queue snapshot releases the abandoned keep promise" {
     try exercise(.oom);
+}
+
+test "queued cache: interrupted retention abandons only its own promise and protects another restore" {
+    try exercise(.cancelled);
+    try exercise(.cancelled_protect);
+    try exercise(.cancelled_no_fit);
 }
