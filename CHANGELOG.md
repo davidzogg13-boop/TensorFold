@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Windows: a checkpoint step's released pages leave the process working set, not just the page cache, so a unified-memory host's cached shards no longer crowd the device's allocations out. `madvise(MADV_DONTNEED)` has no per-range counterpart on Windows, so the trim is the whole process's set, taken once a step rather than once a shard; the pages go to the standby list and a later read is a soft fault. Linux and macOS are unchanged.
+
 - Server: `background: true` on `POST /v1/responses` answers at once with a queued response and generates the reply after the POST returns; `GET /v1/responses/{id}` polls it and `POST /v1/responses/{id}/cancel` or `DELETE` stops it, at most 64 are queued or running per server (16 per key, 256 MiB of copied requests) before a create answers 429, and `stream: true` with `background` is refused (#3220).
 
 - Qwen 3.5 on CUDA: a dropped kept prompt state's pinned host buffer goes to a spare list of at most two, and the next save or recall blank of the same size reuses it instead of pinning new memory; spares count inside the prompt-cache budget and are freed before any state is evicted (#2841).
