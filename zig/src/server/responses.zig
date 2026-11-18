@@ -48,14 +48,14 @@ fn refusal(a: Allocator, message: []const u8, param: ?[]const u8) !Value {
 }
 
 pub fn get(srv: *Server, conn: *Conn, a: Allocator, rid: []const u8) void {
-    const found = srv.store.get(srv.io, a, rid) catch null;
+    const found = srv.store.get(srv.io, a, rid, conn.key_digest) catch null;
     if (found) |v| return routes.sendValue(conn, a, 200, v);
     refuse(conn, a, std.fmt.allocPrint(a, "no stored response has id {s}", .{pyrepr.repr(a, .{ .string = rid }) catch rid}) catch return, 404, "response_id");
 }
 
 pub fn delete(srv: *Server, conn: *Conn, a: Allocator, rid: ?[]const u8) void {
     const id = rid orelse "";
-    if (rid == null or id.len == 0 or !srv.store.delete(srv.io, id)) {
+    if (rid == null or id.len == 0 or !srv.store.delete(srv.io, id, conn.key_digest)) {
         const shown = if (rid) |r| pyrepr.repr(a, .{ .string = r }) catch r else "None";
         return refuse(conn, a, std.fmt.allocPrint(a, "no stored response has id {s}", .{shown}) catch return, 404, "response_id");
     }
@@ -77,7 +77,7 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     // a restricted key is stateless here: checked before any stored conversation is read
     if (@import("auth_scope.zig").responseDenial(conn.key_scopes, body)) |why|
         return @import("auth_scope_reply.zig").deny(conn, false, why);
-    const history: store_mod.History = .{ .store = &srv.store, .io = srv.io };
+    const history: store_mod.History = .{ .store = &srv.store, .io = srv.io, .owner = conn.key_digest };
     const t = translate_mod.translate(&cx, body, history) catch return refuse(conn, a, cx.message, 400, null);
     switch (turn(srv, a, conn, &cx, body, t, @import("responses_sink.zig").sse(conn), .{})) {
         .streamed => {},
@@ -115,7 +115,7 @@ pub fn turn(srv: *Server, a: Allocator, conn: *Conn, cx: *Cx, body: Value, t: tr
     }
     // a reply with tools gets its rows once its calls are parsed: each item's done events wait for them
     const late = json.truthyField(t.chat, "logprobs") and json.truthyField(t.chat, "tools");
-    var reply: Reply = .{ .srv = srv, .a = a, .sink = sink, .base = base, .streaming = t.stream, .keep = t.store, .added = t.added, .cx = cx, .call_ids = .{ .key = &srv.tool_ids, .body = t.chat }, .whole_history = opts.whole_history, .late_rows = late };
+    var reply: Reply = .{ .srv = srv, .a = a, .sink = sink, .base = base, .streaming = t.stream, .keep = t.store, .added = t.added, .cx = cx, .owner = conn.key_digest, .call_ids = .{ .key = &srv.tool_ids, .body = t.chat }, .whole_history = opts.whole_history, .late_rows = late };
     var out: Wire = .{ .reply = &reply };
     cancel_ids.alias = base.get("id").?.string; // the cancel route takes the response's id too
     defer cancel_ids.alias = null;
@@ -127,9 +127,9 @@ pub fn turn(srv: *Server, a: Allocator, conn: *Conn, cx: *Cx, body: Value, t: tr
 }
 
 /// A ``generate: false`` turn: created, in progress, then completed with no output and ``prompt_tokens`` of input.
-pub fn warmup(srv: *Server, a: Allocator, cx: *Cx, body: Value, t: translate_mod.Request, sink: Sink, prompt_tokens: usize, opts: TurnOptions) ?Value {
+pub fn warmup(srv: *Server, a: Allocator, cx: *Cx, body: Value, t: translate_mod.Request, sink: Sink, prompt_tokens: usize, opts: TurnOptions, owner: ?[32]u8) ?Value {
     const base = newBase(srv, a, body, t) catch return null;
-    var reply: Reply = .{ .srv = srv, .a = a, .sink = sink, .base = base, .streaming = true, .keep = t.store, .added = t.added, .cx = cx, .call_ids = .{ .key = &srv.tool_ids, .body = t.chat }, .whole_history = opts.whole_history, .warmup = true };
+    var reply: Reply = .{ .srv = srv, .a = a, .sink = sink, .base = base, .streaming = true, .keep = t.store, .added = t.added, .cx = cx, .owner = owner, .call_ids = .{ .key = &srv.tool_ids, .body = t.chat }, .whole_history = opts.whole_history, .warmup = true };
     const usage = json.newObject(a) catch return null;
     usage.put(a, "prompt_tokens", json.intValue(a, prompt_tokens) catch return null) catch return null;
     usage.put(a, "completion_tokens", .{ .int = "0" }) catch return null;
@@ -194,6 +194,7 @@ const Wire = struct {
 /// A Response built from chat-completion deltas, in order: reasoning, text, calls; streamed as typed events.
 const Reply = struct {
     srv: *Server,
+    owner: ?[32]u8,
     a: Allocator,
     sink: Sink,
     base: *json.Object,
@@ -477,10 +478,10 @@ const Reply = struct {
     /// Keeps the final response: chained to its stored parent, or whole when the parent came from elsewhere.
     fn store(r: *Reply, final: Value) void {
         const s = &r.srv.store;
-        const earlier = r.whole_history orelse return s.put(r.srv.io, r.cx, final, r.added) catch {};
+        const earlier = r.whole_history orelse return s.put(r.srv.io, r.cx, final, r.added, r.owner) catch {};
         const from_output = translate_mod.messages(r.cx, final.get("output").?.array) catch return;
         const all = std.mem.concat(r.cx.a, Value, &.{ earlier, r.added, from_output }) catch return;
-        s.putWhole(r.srv.io, r.cx, final, all) catch {};
+        s.putWhole(r.srv.io, r.cx, final, all, r.owner) catch {};
     }
 
     fn fail(r: *Reply, problem: Value) E!void {
