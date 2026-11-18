@@ -128,7 +128,8 @@ class AgentTests(unittest.TestCase):
         with patch.object(bench.bench_stream, "Collector", TimedCollector):
             code, report, _ = invoke(Fixture("role_first"))
         self.assertEqual(code, 0)
-        self.assertTrue(all(row["ttft_s"] == 3 for row in report["rows"]))
+        # (sent + 3) - sent rounds off 3.0 for many perf_counter values (a fresh runner's uptime): compare within 1 us
+        self.assertTrue(all(row["ttft_s"] is not None and abs(row["ttft_s"] - 3) < 1e-6 for row in report["rows"]))
 
     def test_unsupported_thinking_switch_is_omitted_and_its_mode_is_recorded(self):
         fixture = Fixture("thinking_default")
