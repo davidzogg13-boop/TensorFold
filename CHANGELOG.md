@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- DeepSeek-V4.1's pack weight-span reads bypass the page cache with O_DIRECT where the file system supports it (`TF_LOAD_DIRECT=0` keeps buffered reads); pack hashing and prepared-image reads still use the cache (#1924, part of #1857).
+- DeepSeek-V4.1's pack weight-span reads bypass the page cache with O_DIRECT where the file system supports it (`TF_LOAD_DIRECT=0` keeps buffered reads); pack hashing and prepared-image reads still use the cache; part of #1857 (#1924).
 
 - Docs: the README is now a short quick start and docs list; setup, serve flags and model tables moved to the new run guide and supported models pages, and the Zig preview and 1.0.0 release notes moved into docs/ (#3170). Thanks to @jayleaton.
 
