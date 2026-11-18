@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: a streamed chat completion, completion or Responses request with `return_progress: true` hears how far its prompt pass has come before the first token. Chat and completions send `tensorfold.progress` in a chunk with empty `choices`, as the `include_usage` chunk does; Responses sends a `tensorfold.progress` event. Each count is higher than the last and the last has `done` equal to `total`, just before the reply's first token. Counts come from the fill atomic after a call returns, with no new lock held or GPU sync. Off by default: without the field, or with it false, or on a stream with no progress writer (a whole reply, Messages and Cortheon turns), the stream is byte for byte unchanged and no token changes (#3216, for #3116).
+
 - Docs: the README is now a short quick start and docs list; setup, serve flags and model tables moved to the new run guide and supported models pages, and the Zig preview and 1.0.0 release notes moved into docs/ (#3170). Thanks to @jayleaton.
 
 - Qwen3.8-27B on Intel GPUs: `logprobs` and `top_logprobs` are served, for a lone drafted stream, plain streams and shared rounds, greedy and sampled, with the tokens bit-equal to a request without them and a drafted stream's rows equal to a plain one's; `prompt_logprobs` is still refused. Decode costs 2.9% to 5.4% for a lone drafted stream and 12.9% for two streams at once (a total rate, prefill included); these are an order of magnitude from one Arc Pro B70 in a Gen5 x16 slot, and only the with and without pairs compare (#3051 via #3722, for #3050). Thanks to @Mirrdhyn.
